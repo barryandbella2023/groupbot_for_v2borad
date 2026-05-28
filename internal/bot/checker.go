@@ -160,6 +160,7 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 	}
 
 	// 在群组中发送踢出通知，合并为一条消息，注意 TG 4096 字符限制
+	// 群内通知 10 秒后自动删除，避免长期堆积
 	if len(kickedLines) > 0 {
 		const maxLen = 4096 - 10
 		var batch []string
@@ -168,7 +169,7 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 		for _, line := range kickedLines {
 			lineLen := len([]rune(line)) + 1
 			if currentLen+lineLen > maxLen && len(batch) > 0 {
-				_, _ = c.bot.Send(chat, strings.Join(batch, "\n"))
+				c.sendAutoDelete(chat, strings.Join(batch, "\n"), 10*time.Second)
 				batch = batch[:0]
 				currentLen = 0
 				time.Sleep(500 * time.Millisecond)
@@ -177,9 +178,23 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 			currentLen += lineLen
 		}
 		if len(batch) > 0 {
-			_, _ = c.bot.Send(chat, strings.Join(batch, "\n"))
+			c.sendAutoDelete(chat, strings.Join(batch, "\n"), 10*time.Second)
 		}
 	}
 
 	return kicked
+}
+
+// sendAutoDelete 在群组发送消息，并在指定时间后自动删除
+func (c *Checker) sendAutoDelete(chat *tele.Chat, text string, ttl time.Duration) {
+	msg, err := c.bot.Send(chat, text)
+	if err != nil || msg == nil {
+		return
+	}
+	go func() {
+		time.Sleep(ttl)
+		if err := c.bot.Delete(msg); err != nil {
+			slog.Debug("删除巡检通知失败", "chat_id", chat.ID, "msg_id", msg.ID, "error", err)
+		}
+	}()
 }
