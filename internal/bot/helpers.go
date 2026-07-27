@@ -119,6 +119,18 @@ func displayName(u *tele.User) string {
 	return name
 }
 
+// mdEscape 转义 Telegram Markdown(v1) 中会触发实体解析的字符
+// 需要处理：_ * ` [
+func mdEscape(s string) string {
+	replacer := strings.NewReplacer(
+		"_", "\\_",
+		"*", "\\*",
+		"`", "\\`",
+		"[", "\\[",
+	)
+	return replacer.Replace(s)
+}
+
 // formatUserInfo 详细用户卡片（用于 /cha）
 func formatUserInfo(client *db.Client, user *db.V2User) string {
 	status := userStatus(user)
@@ -129,13 +141,13 @@ func formatUserInfo(client *db.Client, user *db.V2User) string {
 	planStr := "无"
 	if user.PlanID.Valid && user.PlanID.Int64 != 0 {
 		if name := client.FindPlanNameByID(user.PlanID.Int64); name != "" {
-			planStr = fmt.Sprintf("%s (ID: %d)", name, user.PlanID.Int64)
+			planStr = fmt.Sprintf("%s (ID: %d)", mdEscape(name), user.PlanID.Int64)
 		} else {
 			planStr = fmt.Sprintf("ID: %d", user.PlanID.Int64)
 		}
 	}
 	return fmt.Sprintf(
-		"👤 ID：%d\n📧 邮箱：%s\n📦 套餐：%s\n⏰ 到期：%s\n📊 %s\n📌 状态：%s",
+		"👤 ID：%d\n📧 邮箱：`%s`\n📦 套餐：%s\n⏰ 到期：%s\n📊 %s\n📌 状态：%s",
 		user.ID, user.Email, planStr, expiredStr, trafficLine(user), status,
 	)
 }
@@ -181,7 +193,7 @@ func formatStatusLine(client *db.Client, user *db.V2User, mask bool) string {
 	planStr := "无"
 	if user.PlanID.Valid && user.PlanID.Int64 != 0 {
 		if name := client.FindPlanNameByID(user.PlanID.Int64); name != "" {
-			planStr = name
+			planStr = mdEscape(name)
 		} else {
 			planStr = fmt.Sprintf("ID %d", user.PlanID.Int64)
 		}

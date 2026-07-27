@@ -254,14 +254,15 @@ func (h *Handler) startVerify(chat *tele.Chat, user *tele.User, group *config.Gr
 	btn.Inline(btn.Row(btnVerify))
 
 	var prompt string
+	safeName := mdEscape(displayName(user))
 	if isNewJoin {
 		prompt = fmt.Sprintf("👋 欢迎 [%s](tg://user?id=%d)！\n\n"+
 			"请在 *%d 秒*内点击下方按钮完成验证，否则将被移出群组。",
-			displayName(user), userID, group.VerifyTimeout)
+			safeName, userID, group.VerifyTimeout)
 	} else {
 		prompt = fmt.Sprintf("⚠️ [%s](tg://user?id=%d) 检测到您尚未通过验证。\n\n"+
 			"请在 *%d 秒*内点击下方按钮完成验证，否则将被移出群组。",
-			displayName(user), userID, group.VerifyTimeout)
+			safeName, userID, group.VerifyTimeout)
 	}
 
 	msg, err := h.bot.Send(chat, prompt, tele.ModeMarkdown, btn)
@@ -316,7 +317,7 @@ func (h *Handler) onChatMemberUpdate(c tele.Context) error {
 		slog.Info("白名单用户，跳过验证", "user_id", user.ID)
 		h.markVerified(chat.ID, user.ID)
 		_, _ = h.bot.Send(chat,
-			fmt.Sprintf("👋 欢迎 [%s](tg://user?id=%d) 加入！", displayName(user), user.ID),
+			fmt.Sprintf("👋 欢迎 [%s](tg://user?id=%d) 加入！", mdEscape(displayName(user)), user.ID),
 			tele.ModeMarkdown,
 		)
 		return nil
@@ -350,7 +351,7 @@ func (h *Handler) onUserJoined(c tele.Context) error {
 		slog.Info("白名单用户，跳过验证", "user_id", userID)
 		h.markVerified(chatID, userID)
 		_, _ = c.Bot().Send(c.Chat(),
-			fmt.Sprintf("👋 欢迎 [%s](tg://user?id=%d) 加入！", displayName(user), userID),
+			fmt.Sprintf("👋 欢迎 [%s](tg://user?id=%d) 加入！", mdEscape(displayName(user)), userID),
 			tele.ModeMarkdown,
 		)
 		return nil
@@ -406,7 +407,7 @@ func (h *Handler) verifyTimeout(userID int64, timeoutSec int) {
 		_ = h.bot.Delete(&tele.Message{ID: pv.MessageID, Chat: chat})
 	}
 
-	kickText := fmt.Sprintf("⏰ [%s](tg://user?id=%d) 验证超时，已被移出群组。", pv.DisplayName, userID)
+	kickText := fmt.Sprintf("⏰ [%s](tg://user?id=%d) 验证超时，已被移出群组。", mdEscape(pv.DisplayName), userID)
 	kickMsg, _ := h.bot.Send(chat, kickText, tele.ModeMarkdown)
 	if kickMsg != nil {
 		go func() {
@@ -546,11 +547,12 @@ func (h *Handler) approveUser(userID int64, planName string) {
 		name = displayName(member.User)
 	}
 
+	safeName := mdEscape(name)
 	var welcomeText string
 	if planName != "" {
-		welcomeText = fmt.Sprintf("👏 欢迎 尊贵的 %s 用户 [%s](tg://user?id=%d)", planName, name, userID)
+		welcomeText = fmt.Sprintf("👏 欢迎 尊贵的 %s 用户 [%s](tg://user?id=%d)", mdEscape(planName), safeName, userID)
 	} else {
-		welcomeText = fmt.Sprintf("👏 欢迎 [%s](tg://user?id=%d)", name, userID)
+		welcomeText = fmt.Sprintf("👏 欢迎 [%s](tg://user?id=%d)", safeName, userID)
 	}
 	welcomeMsg, _ := h.bot.Send(chat, welcomeText, tele.ModeMarkdown)
 	if welcomeMsg != nil {
@@ -886,7 +888,7 @@ func (h *Handler) onCha(c tele.Context) error {
 	}
 
 	return c.Send(
-		fmt.Sprintf("🔍 查询结果（TG ID: `%d`）\n\n📧 邮箱：%s\n⚠️ 数据库中未找到该用户", tgID, b.Email),
+		fmt.Sprintf("🔍 查询结果（TG ID: `%d`）\n\n📧 邮箱：`%s`\n⚠️ 数据库中未找到该用户", tgID, b.Email),
 		tele.ModeMarkdown,
 	)
 }
