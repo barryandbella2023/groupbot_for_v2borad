@@ -102,7 +102,7 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 	var kickedLines []string
 
 	for tgID, entry := range expiredUsers {
-		if group.IsExempt(tgID) {
+		if group.IsExempt(tgID) || c.config.IsAdmin(tgID) {
 			continue
 		}
 
@@ -113,6 +113,11 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 		}
 
 		if member.Role == tele.Left {
+			continue
+		}
+		// Telegram 不允许踢出群主和管理员
+		if member.Role == tele.Creator || member.Role == tele.Administrator {
+			slog.Debug("群管理员，跳过巡检踢出", "user_id", tgID)
 			continue
 		}
 		if member.Role == tele.Kicked {
