@@ -49,6 +49,8 @@ func New(cfg config.DatabaseConfig) (*Client, error) {
 	conn.SetMaxOpenConns(3)
 	conn.SetMaxIdleConns(2)
 	conn.SetConnMaxLifetime(5 * time.Minute)
+	// 须短于 MySQL wait_timeout，避免复用已被服务端关闭的空闲连接
+	conn.SetConnMaxIdleTime(1 * time.Minute)
 
 	if err := conn.Ping(); err != nil {
 		return nil, fmt.Errorf("数据库连接测试失败 [%s]: %w", cfg.DBName, err)
