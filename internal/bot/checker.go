@@ -113,6 +113,7 @@ func (c *Checker) RunCheck() {
 		total.skippedAbsent += s.skippedAbsent
 		total.apiCalls += s.apiCalls
 		total.apiErrors += s.apiErrors
+		total.notFound += s.notFound
 		total.kicked += s.kicked
 	}
 
@@ -122,6 +123,7 @@ func (c *Checker) RunCheck() {
 		"skipped_absent", total.skippedAbsent,
 		"api_calls", total.apiCalls,
 		"api_errors", total.apiErrors,
+		"not_found", total.notFound,
 		"duration", time.Since(start).Round(time.Second),
 	)
 }
@@ -131,8 +133,17 @@ type checkStats struct {
 	invalid       int // 套餐失效的绑定用户数
 	skippedAbsent int // 因已确认不在群内而跳过的数量
 	apiCalls      int // getChatMember 调用次数
-	apiErrors     int // getChatMember 失败次数
+	apiErrors     int // getChatMember 失败次数（不含用户不存在）
+	notFound      int // Telegram 判定用户不存在（已注销等），按不在群内处理
 	kicked        int
+}
+
+// isUserNotFound 判断 getChatMember 错误是否表示该用户在 Telegram 侧不存在
+func isUserNotFound(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "PARTICIPANT_ID_INVALID") ||
+		strings.Contains(msg, "USER_ID_INVALID") ||
+		strings.Contains(msg, "user not found")
 }
 
 // invalidEntry 记录一个待踢出用户的失效原因
@@ -182,6 +193,11 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 		tgUser := &tele.User{ID: tgID}
 		stats.apiCalls++
 		member, err := c.bot.ChatMemberOf(chat, tgUser)
+		if err != nil && isUserNotFound(err) {
+			c.markAbsent(chatID, tgID)
+			stats.notFound++
+			continue
+		}
 		if err != nil {
 			stats.apiErrors++
 			lastAPIErr = err
