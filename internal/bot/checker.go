@@ -1,9 +1,11 @@
 package bot
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	tele "gopkg.in/telebot.v3"
@@ -24,6 +26,48 @@ type Checker struct {
 	groups      map[int64]*config.GroupConfig
 	bindings    *binding.Store
 	invalidate  Invalidator
+
+	// absent: chatID -> (userID -> 确认不在群内的时间)
+	// 失效用户大多早已不在群内，记录后在 absentTTL 内跳过，避免每轮都调用 getChatMember
+	absentMu sync.Mutex
+	absent   map[int64]map[int64]time.Time
+}
+
+// absentTTL 不在群内的记录有效期；入群/发言会提前清除，到期后巡检再复查一次
+const absentTTL = 6 * time.Hour
+
+// MarkPresent 用户入群或在群内发言时调用，清除其"不在群内"记录
+func (c *Checker) MarkPresent(chatID, userID int64) {
+	c.absentMu.Lock()
+	defer c.absentMu.Unlock()
+	if m, ok := c.absent[chatID]; ok {
+		delete(m, userID)
+	}
+}
+
+func (c *Checker) markAbsent(chatID, userID int64) {
+	c.absentMu.Lock()
+	defer c.absentMu.Unlock()
+	m, ok := c.absent[chatID]
+	if !ok {
+		m = make(map[int64]time.Time)
+		c.absent[chatID] = m
+	}
+	m[userID] = time.Now()
+}
+
+func (c *Checker) isAbsent(chatID, userID int64) bool {
+	c.absentMu.Lock()
+	defer c.absentMu.Unlock()
+	at, ok := c.absent[chatID][userID]
+	if !ok {
+		return false
+	}
+	if time.Since(at) > absentTTL {
+		delete(c.absent[chatID], userID)
+		return false
+	}
+	return true
 }
 
 // NewChecker 构造一个 Checker，invalidate 可为 nil
@@ -39,6 +83,7 @@ func NewChecker(b *tele.Bot, cfg *config.Config, dbClients map[int64]*db.Client,
 		groups:     groups,
 		bindings:   bindings,
 		invalidate: invalidate,
+		absent:     make(map[int64]map[int64]time.Time),
 	}
 }
 
@@ -58,14 +103,36 @@ func (c *Checker) Start() {
 // RunCheck 执行一次巡检
 func (c *Checker) RunCheck() {
 	slog.Info("开始巡检...")
-	totalKicked := 0
+	start := time.Now()
+	var total checkStats
 
 	for chatID, client := range c.dbClients {
 		group := c.groups[chatID]
-		totalKicked += c.checkGroup(chatID, client, group)
+		s := c.checkGroup(chatID, client, group)
+		total.invalid += s.invalid
+		total.skippedAbsent += s.skippedAbsent
+		total.apiCalls += s.apiCalls
+		total.apiErrors += s.apiErrors
+		total.kicked += s.kicked
 	}
 
-	slog.Info("巡检完成", "total_kicked", totalKicked)
+	slog.Info("巡检完成",
+		"total_kicked", total.kicked,
+		"invalid_users", total.invalid,
+		"skipped_absent", total.skippedAbsent,
+		"api_calls", total.apiCalls,
+		"api_errors", total.apiErrors,
+		"duration", time.Since(start).Round(time.Second),
+	)
+}
+
+// checkStats 单轮巡检统计
+type checkStats struct {
+	invalid       int // 套餐失效的绑定用户数
+	skippedAbsent int // 因已确认不在群内而跳过的数量
+	apiCalls      int // getChatMember 调用次数
+	apiErrors     int // getChatMember 失败次数
+	kicked        int
 }
 
 // invalidEntry 记录一个待踢出用户的失效原因
@@ -74,7 +141,8 @@ type invalidEntry struct {
 	reason string
 }
 
-func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.GroupConfig) int {
+func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.GroupConfig) checkStats {
+	var stats checkStats
 	expiredUsers := make(map[int64]invalidEntry)
 
 	// 巡检以本地 bindings.json 为权威源（DB 中 telegram_id 字段在启动时已种子导入）
@@ -92,36 +160,51 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 		}
 	}
 
+	stats.invalid = len(expiredUsers)
 	if len(expiredUsers) == 0 {
 		slog.Debug("无过期用户", "chat_id", chatID)
-		return 0
+		return stats
 	}
 
 	chat := &tele.Chat{ID: chatID}
-	kicked := 0
 	var kickedLines []string
+	var lastAPIErr error
 
 	for tgID, entry := range expiredUsers {
 		if group.IsExempt(tgID) || c.config.IsAdmin(tgID) {
 			continue
 		}
-
-		tgUser := &tele.User{ID: tgID}
-		member, err := c.bot.ChatMemberOf(chat, tgUser)
-		if err != nil {
+		if c.isAbsent(chatID, tgID) {
+			stats.skippedAbsent++
 			continue
 		}
 
-		if member.Role == tele.Left {
+		tgUser := &tele.User{ID: tgID}
+		stats.apiCalls++
+		member, err := c.bot.ChatMemberOf(chat, tgUser)
+		if err != nil {
+			stats.apiErrors++
+			lastAPIErr = err
+			var flood tele.FloodError
+			if errors.As(err, &flood) && flood.RetryAfter > 0 {
+				slog.Warn("巡检触发 Telegram 限流，暂停后继续",
+					"chat_id", chatID, "retry_after", flood.RetryAfter,
+				)
+				time.Sleep(time.Duration(flood.RetryAfter) * time.Second)
+			}
+			continue
+		}
+
+		if member.Role == tele.Left || member.Role == tele.Kicked {
+			c.markAbsent(chatID, tgID)
+			if c.invalidate != nil {
+				c.invalidate(chatID, tgID)
+			}
 			continue
 		}
 		// Telegram 不允许踢出群主和管理员
 		if member.Role == tele.Creator || member.Role == tele.Administrator {
 			slog.Debug("群管理员，跳过巡检踢出", "user_id", tgID)
-			continue
-		}
-		if member.Role == tele.Kicked {
-			slog.Debug("用户已被其他来源封禁，跳过", "user_id", tgID)
 			continue
 		}
 
@@ -151,7 +234,8 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 		if c.invalidate != nil {
 			c.invalidate(chatID, tgID)
 		}
-		kicked++
+		c.markAbsent(chatID, tgID)
+		stats.kicked++
 		kickedLines = append(kickedLines, fmt.Sprintf("• %s 因%s被移除", name, entry.reason))
 		slog.Info("已踢出失效用户",
 			"chat_id", chatID, "user_id", tgID, "email", entry.email, "reason", entry.reason,
@@ -187,7 +271,12 @@ func (c *Checker) checkGroup(chatID int64, client *db.Client, group *config.Grou
 		}
 	}
 
-	return kicked
+	if lastAPIErr != nil {
+		slog.Warn("巡检查询群成员存在失败",
+			"chat_id", chatID, "failed", stats.apiErrors, "last_error", lastAPIErr,
+		)
+	}
+	return stats
 }
 
 // sendAutoDelete 在群组发送消息，并在指定时间后自动删除

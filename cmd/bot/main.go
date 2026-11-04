@@ -64,7 +64,7 @@ func main() {
 
 	b, err := tele.NewBot(tele.Settings{
 		Token: cfg.Telegram.BotToken,
-		Poller: &tele.LongPoller{
+		Poller: &bot.SafePoller{
 			Timeout:        30 * time.Second,
 			AllowedUpdates: tele.AllowedUpdates,
 		},
@@ -81,6 +81,7 @@ func main() {
 	handler.Register()
 
 	checker := bot.NewChecker(b, cfg, dbClients, bindings, handler.Invalidate)
+	handler.OnPresent(checker.MarkPresent)
 	go checker.Start()
 
 	slog.Info("机器人已启动，等待事件...")

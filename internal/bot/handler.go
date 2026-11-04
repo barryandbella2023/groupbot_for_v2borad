@@ -38,6 +38,20 @@ type Handler struct {
 	// verifyCache: chatID -> LRU(userID -> struct{})
 	// 已通过验证的用户白名单缓存，避免每条群消息都查 DB
 	verifyCache map[int64]*lru.Cache[int64, struct{}]
+
+	// onPresent 在确认用户位于群内（入群/发言）时回调，可为 nil
+	onPresent func(chatID, userID int64)
+}
+
+// OnPresent 设置用户在群内时的回调，须在 bot 启动前调用
+func (h *Handler) OnPresent(fn func(chatID, userID int64)) {
+	h.onPresent = fn
+}
+
+func (h *Handler) notifyPresent(chatID, userID int64) {
+	if h.onPresent != nil {
+		h.onPresent(chatID, userID)
+	}
 }
 
 // NewHandler 构造一个 Handler
@@ -152,6 +166,7 @@ func (h *Handler) groupVerifyMiddleware() tele.MiddlewareFunc {
 			if user == nil || user.IsBot {
 				return next(c)
 			}
+			h.notifyPresent(chat.ID, user.ID)
 			msg := c.Message()
 			// service messages（加群/退群/置顶等）不走验证逻辑
 			if msg != nil && (msg.UserJoined != nil || msg.UserLeft != nil ||
@@ -312,6 +327,7 @@ func (h *Handler) onChatMemberUpdate(c tele.Context) error {
 	if !ok {
 		return nil
 	}
+	h.notifyPresent(chat.ID, user.ID)
 
 	if group.IsExempt(user.ID) {
 		slog.Info("白名单用户，跳过验证", "user_id", user.ID)
@@ -346,6 +362,7 @@ func (h *Handler) onUserJoined(c tele.Context) error {
 	if !ok {
 		return nil
 	}
+	h.notifyPresent(chatID, userID)
 
 	if group.IsExempt(userID) {
 		slog.Info("白名单用户，跳过验证", "user_id", userID)
