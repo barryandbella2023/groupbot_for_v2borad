@@ -68,6 +68,13 @@ func main() {
 			Timeout:        30 * time.Second,
 			AllowedUpdates: tele.AllowedUpdates,
 		},
+		OnError: func(err error, c tele.Context) {
+			if c != nil {
+				slog.Error("处理更新出错", "update_id", c.Update().ID, "error", err)
+				return
+			}
+			slog.Error("Telegram 请求出错", "error", err)
+		},
 	})
 	if err != nil {
 		slog.Error("创建 Bot 失败", "error", err)
@@ -77,11 +84,14 @@ func main() {
 
 	applyBotProfile(b, cfg.Telegram.Profile)
 
-	handler := bot.NewHandler(b, cfg, dbClients, bindings)
+	// 运行状态文件与绑定文件放在同一目录
+	handler := bot.NewHandler(b, cfg, dbClients, bindings, *bindingPath+".pending.json")
 	handler.Register()
 
-	checker := bot.NewChecker(b, cfg, dbClients, bindings, handler.Invalidate)
+	checker := bot.NewChecker(b, cfg, dbClients, bindings, handler.Invalidate, *bindingPath+".absent.json")
 	handler.OnPresent(checker.MarkPresent)
+	handler.OnCheckTrigger(checker.TriggerCheck)
+	handler.RestorePending()
 	go checker.Start()
 
 	slog.Info("机器人已启动，等待事件...")

@@ -2,9 +2,14 @@ package binding
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
+
+	"v2board-tg-bot/internal/atomicfile"
 )
 
 // UserBinding 单个 Telegram 账号到面板账户的本地绑定
@@ -22,13 +27,19 @@ type Store struct {
 }
 
 // New 打开（或初始化）绑定存储
+// 文件不存在时从空数据开始；文件存在但无法读取或解析时返回错误，
+// 避免以空数据启动后在下一次写入时覆盖掉全部绑定
 func New(filePath string) (*Store, error) {
 	s := &Store{
 		filePath: filePath,
 		data:     make(map[int64]UserBinding),
 	}
 	if err := s.load(); err != nil {
-		slog.Warn("绑定文件不存在或为空，将创建新文件", "path", filePath)
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Warn("绑定文件不存在，将创建新文件", "path", filePath)
+			return s, nil
+		}
+		return nil, fmt.Errorf("读取绑定文件失败 [%s]: %w", filePath, err)
 	}
 	return s, nil
 }
@@ -45,11 +56,7 @@ func (s *Store) load() error {
 }
 
 func (s *Store) save() error {
-	raw, err := json.MarshalIndent(s.data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.filePath, raw, 0644)
+	return atomicfile.WriteJSON(s.filePath, s.data)
 }
 
 func (s *Store) Set(telegramID int64, email, dbName string) error {
@@ -69,7 +76,7 @@ func (s *Store) SetIfAbsent(telegramID int64, email, dbName string) bool {
 		return false
 	}
 	for _, b := range s.data {
-		if b.Email == email {
+		if strings.EqualFold(b.Email, email) {
 			return false
 		}
 	}
@@ -107,11 +114,12 @@ func (s *Store) Delete(telegramID int64) error {
 }
 
 // FindByEmail 检查某个邮箱是否已被其他 Telegram 账号绑定，返回 telegram_id；未找到返回 0
+// 邮箱比较不区分大小写，与 MySQL 默认排序规则一致
 func (s *Store) FindByEmail(email string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for tgID, b := range s.data {
-		if b.Email == email {
+		if strings.EqualFold(b.Email, email) {
 			return tgID
 		}
 	}

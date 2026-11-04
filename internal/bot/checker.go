@@ -1,15 +1,19 @@
 package bot
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tele "gopkg.in/telebot.v3"
 
+	"v2board-tg-bot/internal/atomicfile"
 	"v2board-tg-bot/internal/binding"
 	"v2board-tg-bot/internal/config"
 	"v2board-tg-bot/internal/db"
@@ -31,6 +35,10 @@ type Checker struct {
 	// 失效用户大多早已不在群内，记录后在 absentTTL 内跳过，避免每轮都调用 getChatMember
 	absentMu sync.Mutex
 	absent   map[int64]map[int64]time.Time
+	// absentPath 不在群内记录的持久化文件，为空则不持久化
+	absentPath string
+
+	running atomic.Bool
 }
 
 // absentTTL 不在群内的记录有效期；入群/发言会提前清除，到期后巡检再复查一次
@@ -70,13 +78,71 @@ func (c *Checker) isAbsent(chatID, userID int64) bool {
 	return true
 }
 
-// NewChecker 构造一个 Checker，invalidate 可为 nil
-func NewChecker(b *tele.Bot, cfg *config.Config, dbClients map[int64]*db.Client, bindings *binding.Store, invalidate Invalidator) *Checker {
+// loadAbsent 从磁盘恢复不在群内的记录，过期条目丢弃
+func (c *Checker) loadAbsent() {
+	if c.absentPath == "" {
+		return
+	}
+	raw, err := os.ReadFile(c.absentPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Error("读取不在群内记录失败", "path", c.absentPath, "error", err)
+		}
+		return
+	}
+	var data map[int64]map[int64]time.Time
+	if err := json.Unmarshal(raw, &data); err != nil {
+		slog.Error("解析不在群内记录失败", "path", c.absentPath, "error", err)
+		return
+	}
+	loaded := 0
+	for chatID, users := range data {
+		for userID, at := range users {
+			if time.Since(at) > absentTTL {
+				continue
+			}
+			if c.absent[chatID] == nil {
+				c.absent[chatID] = make(map[int64]time.Time)
+			}
+			c.absent[chatID][userID] = at
+			loaded++
+		}
+	}
+	slog.Info("已恢复不在群内记录", "count", loaded)
+}
+
+// saveAbsent 把未过期的不在群内记录写入磁盘
+func (c *Checker) saveAbsent() {
+	if c.absentPath == "" {
+		return
+	}
+	c.absentMu.Lock()
+	data := make(map[int64]map[int64]time.Time, len(c.absent))
+	for chatID, users := range c.absent {
+		m := make(map[int64]time.Time, len(users))
+		for userID, at := range users {
+			if time.Since(at) > absentTTL {
+				delete(users, userID)
+				continue
+			}
+			m[userID] = at
+		}
+		data[chatID] = m
+	}
+	c.absentMu.Unlock()
+
+	if err := atomicfile.WriteJSON(c.absentPath, data); err != nil {
+		slog.Error("保存不在群内记录失败", "path", c.absentPath, "error", err)
+	}
+}
+
+// NewChecker 构造一个 Checker，invalidate 可为 nil；absentPath 为不在群内记录的持久化文件路径
+func NewChecker(b *tele.Bot, cfg *config.Config, dbClients map[int64]*db.Client, bindings *binding.Store, invalidate Invalidator, absentPath string) *Checker {
 	groups := make(map[int64]*config.GroupConfig)
 	for i := range cfg.Groups {
 		groups[cfg.Groups[i].ChatID] = &cfg.Groups[i]
 	}
-	return &Checker{
+	c := &Checker{
 		bot:        b,
 		config:     cfg,
 		dbClients:  dbClients,
@@ -84,7 +150,10 @@ func NewChecker(b *tele.Bot, cfg *config.Config, dbClients map[int64]*db.Client,
 		bindings:   bindings,
 		invalidate: invalidate,
 		absent:     make(map[int64]map[int64]time.Time),
+		absentPath: absentPath,
 	}
+	c.loadAbsent()
+	return c
 }
 
 // Start 启动定时巡检，阻塞运行
@@ -100,8 +169,25 @@ func (c *Checker) Start() {
 	}
 }
 
-// RunCheck 执行一次巡检
+// TriggerCheck 在后台立即执行一次巡检，已有巡检在进行时返回 false
+func (c *Checker) TriggerCheck() bool {
+	if c.running.Load() {
+		return false
+	}
+	go c.RunCheck()
+	return true
+}
+
+// RunCheck 执行一次巡检；同一时间只允许一轮，已有巡检在进行时直接返回
 func (c *Checker) RunCheck() {
+	if !c.running.CompareAndSwap(false, true) {
+		slog.Info("已有巡检正在进行，本次跳过")
+		return
+	}
+	defer c.running.Store(false)
+	defer logPanic("巡检")
+	defer c.saveAbsent()
+
 	slog.Info("开始巡检...")
 	start := time.Now()
 	var total checkStats

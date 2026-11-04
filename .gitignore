@@ -4,7 +4,7 @@
 /v2board-tg-bot-linux-arm64
 /v2board-tg-bot-windows-amd64.exe
 /bindings.json
-/bindings.json.imported
+/bindings.json.*
 /config.yaml
 /dist/
 /.git-commit-msg.tmp
