@@ -229,7 +229,8 @@ func isUserNotFound(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "PARTICIPANT_ID_INVALID") ||
 		strings.Contains(msg, "USER_ID_INVALID") ||
-		strings.Contains(msg, "user not found")
+		strings.Contains(msg, "user not found") ||
+		strings.Contains(msg, "member not found")
 }
 
 // invalidEntry 记录一个待踢出用户的失效原因
